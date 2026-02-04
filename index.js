@@ -2,10 +2,12 @@ import { createPublicClient, http, parseAbiItem } from 'viem';
 import { baseSepolia } from 'viem/chains';
 import fs from 'fs/promises';
 import path from 'path';
+import jwt from 'jsonwebtoken';
 
 // --- CONFIGURATION ---
 const USDC_ADDRESS = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"; // Base Sepolia USDC
 const DB_PATH = path.resolve('./used-txs.json');
+const JWT_SECRET = process.env.JWT_SECRET || "quokka_secret_key_change_me"; 
 
 // --- CLIENT SETUP ---
 const client = createPublicClient({
@@ -95,12 +97,27 @@ export function turnstile(config) {
     const { receiver, price, chain = "Base Sepolia" } = config;
 
     return async (req, res, next) => {
+        // 1. Check for valid Session Token (Day Pass)
+        const authHeader = req.headers['authorization'];
+        if (authHeader && authHeader.startsWith('Bearer ')) {
+            const token = authHeader.split(' ')[1];
+            try {
+                jwt.verify(token, JWT_SECRET);
+                console.log("🎟️ Valid Session Token. Skipping payment check.");
+                return next();
+            } catch (err) {
+                console.log("⚠️ Invalid or expired token. Requesting payment.");
+                // Fall through to payment check
+            }
+        }
+
+        // 2. Check for Payment TX
         const paymentTx = req.headers['x-payment-tx'];
 
         if (!paymentTx) {
             return res.status(402).json({
                 error: "Payment Required",
-                message: "This agent endpoint requires payment.",
+                message: "This endpoint requires payment. Pay once, get a Day Pass (24h).",
                 payment_details: {
                     chain: chain,
                     token: "USDC",
@@ -119,7 +136,19 @@ export function turnstile(config) {
             return res.status(403).json({ error: "Payment Invalid", reason: result.reason });
         }
 
-        console.log(`✅ Payment Validated! Access Granted.`);
+        // 3. Payment Valid! Issue Day Pass.
+        console.log(`✅ Payment Validated! Issuing Day Pass.`);
+        
+        // Generate JWT (24h validity)
+        const sessionToken = jwt.sign({ 
+            paid: true, 
+            tx: paymentTx,
+            timestamp: Date.now() 
+        }, JWT_SECRET, { expiresIn: '24h' });
+
+        // Send token in header so agent can save it
+        res.setHeader('x-turnstile-session', sessionToken);
+        
         next();
     };
 }
