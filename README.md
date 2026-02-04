@@ -10,56 +10,79 @@ Agents struggle with traditional "Human" commerce:
 
 ## The Solution
 **Turnstile** implements the HTTP **402 Payment Required** status code correctly for the agent economy.
-1.  Agent requests a resource.
-2.  Gateway refuses (402) and returns **Payment Details** (Chain, Token, Amount, Receiver).
-3.  Agent pays on-chain (USDC).
-4.  Agent retries request with `x-payment-tx` header.
-5.  Gateway verifies tx on-chain and serves content.
 
-**No API Keys. No Accounts. Just Pay & Play.**
+### features
+*   **middleware-first:** easy to drop into any express app.
+*   **replay protection:** prevents transaction reuse.
+*   **session tokens:** pay once, get a 1-hour "day pass" (jwt) for unlimited access.
 
-## 🚀 How to Run (Hackathon Demo)
+## the flow
+1.  agent requests resource -> 🔴 **402 error** (payment details returned).
+2.  agent pays usdc on-chain (base sepolia).
+3.  agent retries with `x-payment-tx` header.
+4.  gateway verifies tx & issues **session token** -> 🟢 **200 ok**.
+5.  agent uses `authorization: bearer <token>` for subsequent requests.
 
-### 1. Setup
+**no api keys. no accounts. just pay & play.**
+
+## 🚀 usage
+
+### 1. install
 ```bash
-cd turnstile
+npm install turnstile-gateway
+```
+
+### 2. use middleware
+```javascript
+import { turnstile } from 'turnstile-gateway';
+
+app.get('/premium-resource', 
+  turnstile({ 
+    receiver: "0xYourWallet...", 
+    price: "1.0" 
+  }), 
+  (req, res) => {
+    res.json({ data: "Premium Content" });
+  }
+);
+```
+
+## 🚀 run the demo
+
+### 1. setup
+```bash
+git clone https://github.com/tracychen/turnstile-agent-gateway
+cd turnstile-agent-gateway
 npm install
 ```
 
-### 2. Configure
-Edit `server.js` and set your `RECEIVER_WALLET`:
-```javascript
-const RECEIVER_WALLET = "0xYourWalletAddress";
-```
+### 2. configure
+edit `server.js` and set your `receiver_wallet`.
 
-### 3. Start Server
+### 3. start
 ```bash
 node server.js
 ```
 
-### 4. Test (The Flow)
-
-**Step 1: The Rejection**
+### 4. test
 ```bash
-curl -i http://localhost:3000/api/ace-insight
+# step 1: get rejection
+curl -i http://localhost:3001/api/ace-insight
+
+# step 2: pay 1.0 usdc (base sepolia) & get tx hash
+
+# step 3: exchange tx for session token
+curl -i -H "x-payment-tx: 0x..." http://localhost:3001/api/ace-insight
+
+# step 4: use session token (free access for 1h)
+curl -i -H "Authorization: Bearer <token>" http://localhost:3001/api/ace-insight
 ```
-*Output:* `402 Payment Required` (JSON with wallet address and price).
 
-**Step 2: The Payment**
-Send **1.0 USDC** (Base Sepolia) to the wallet address provided.
-Copy the `Transaction Hash`.
+## tech stack
+*   **chain:** base sepolia (usdc testnet)
+*   **backend:** node.js + express + jsonwebtoken
+*   **crypto:** viem
+*   **token:** circle usdc
 
-**Step 3: The Access**
-```bash
-curl -i -H "x-payment-tx: YOUR_TX_HASH" http://localhost:3000/api/ace-insight
-```
-*Output:* `200 OK` + The Secret Insight! 🐿️
-
-## Tech Stack
-*   **Chain:** Base Sepolia (USDC Testnet)
-*   **Backend:** Node.js + Express
-*   **Crypto Lib:** Viem (Lightweight, robust)
-*   **Token:** Circle USDC (`0x036CbD53842c5426634e7929541eC2318f3dCF7e`)
-
-## Why this wins Agentic Commerce
-It turns every API endpoint into a vending machine. Agents can now "buy" capabilities (computation, storage, data) from each other instantly without human intervention. This is the primitive required for a true machine economy.
+## why this wins agentic commerce
+it turns every api endpoint into a vending machine. agents can "buy" capabilities (computation, storage, data) from each other instantly. with session tokens, we move from "pay-per-request" to "pay-per-session", enabling real saas models for bots.
