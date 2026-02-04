@@ -7,7 +7,7 @@ import jwt from 'jsonwebtoken';
 // --- CONFIGURATION ---
 const USDC_ADDRESS = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"; // Base Sepolia USDC
 const DB_PATH = path.resolve('./used-txs.json');
-const JWT_SECRET = process.env.JWT_SECRET || "quokka_secret_key_change_me"; 
+const JWT_SECRET = process.env.JWT_SECRET || "default_insecure_secret_for_hackathon"; 
 
 // --- CLIENT SETUP ---
 const client = createPublicClient({
@@ -22,7 +22,7 @@ async function isTxUsed(txHash) {
         const usedTxs = JSON.parse(data);
         return usedTxs.includes(txHash);
     } catch (e) {
-        return false; // File might not exist yet
+        return false; 
     }
 }
 
@@ -45,38 +45,44 @@ async function markTxUsed(txHash) {
 // --- VERIFICATION LOGIC ---
 async function verifyPayment(txHash, receiverWallet, price) {
   try {
-    // 0. Replay Protection
     if (await isTxUsed(txHash)) {
-        return { valid: false, reason: "Transaction already used. Please pay again." };
+        return { valid: false, reason: "Transaction already used." };
     }
 
     const tx = await client.getTransaction({ hash: txHash });
     const receipt = await client.getTransactionReceipt({ hash: txHash });
 
-    // 1. Check status
     if (receipt.status !== 'success') return { valid: false, reason: "Transaction failed on-chain." };
 
-    // 2. Decode logs to find Transfer event to our wallet
     const logs = receipt.logs.filter(log => 
       log.address.toLowerCase() === USDC_ADDRESS.toLowerCase()
     );
 
     for (const log of logs) {
       try {
-        // Topic 2: To (padded)
         const toTopic = log.topics[2];
-        const cleanTo = `0x${toTopic.slice(26)}`; // Remove padding
+        const cleanTo = `0x${toTopic.slice(26)}`; 
         
         if (cleanTo.toLowerCase() === receiverWallet.toLowerCase()) {
-            // Check Value (USDC has 6 decimals)
             const valueHex = log.data; 
             const value = parseInt(valueHex, 16);
             const valueFormatted = value / 1000000; 
 
             if (valueFormatted >= parseFloat(price)) {
-                // SUCCESS! Mark as used.
                 await markTxUsed(txHash);
-                return { valid: true };
+                
+                // --- NEW: Generate Session Token ---
+                const token = jwt.sign(
+                    { 
+                        tx: txHash, 
+                        buyer: tx.from,
+                        tier: "premium" 
+                    }, 
+                    JWT_SECRET, 
+                    { expiresIn: '1h' } // 1 Hour Access
+                );
+
+                return { valid: true, token: token };
             }
         }
       } catch (e) {
@@ -84,11 +90,11 @@ async function verifyPayment(txHash, receiverWallet, price) {
       }
     }
     
-    return { valid: false, reason: "No valid USDC transfer to receiver found in transaction." };
+    return { valid: false, reason: "No valid USDC transfer found." };
 
   } catch (error) {
     console.error(error);
-    return { valid: false, reason: "Could not fetch transaction. Invalid Hash?" };
+    return { valid: false, reason: "Invalid Hash" };
   }
 }
 
@@ -97,58 +103,55 @@ export function turnstile(config) {
     const { receiver, price, chain = "Base Sepolia" } = config;
 
     return async (req, res, next) => {
-        // 1. Check for valid Session Token (Day Pass)
+        // 1. Check for existing Session Token
         const authHeader = req.headers['authorization'];
         if (authHeader && authHeader.startsWith('Bearer ')) {
             const token = authHeader.split(' ')[1];
             try {
-                jwt.verify(token, JWT_SECRET);
-                console.log("🎟️ Valid Session Token. Skipping payment check.");
-                return next();
+                const decoded = jwt.verify(token, JWT_SECRET);
+                console.log(`✅ Session Valid: ${decoded.tx}`);
+                req.agentSession = decoded;
+                return next(); // Access Granted
             } catch (err) {
-                console.log("⚠️ Invalid or expired token. Requesting payment.");
-                // Fall through to payment check
+                console.log("❌ Invalid Session Token");
+                // Continue to check for new payment
             }
         }
 
-        // 2. Check for Payment TX
+        // 2. Check for New Payment
         const paymentTx = req.headers['x-payment-tx'];
 
         if (!paymentTx) {
             return res.status(402).json({
                 error: "Payment Required",
-                message: "This endpoint requires payment. Pay once, get a Day Pass (24h).",
+                message: "Pay once, get a 1-hour session token.",
                 payment_details: {
                     chain: chain,
                     token: "USDC",
                     token_address: USDC_ADDRESS,
                     receiver: receiver,
                     amount: price,
-                    instruction: "Send USDC and retry request with header 'x-payment-tx: <your_tx_hash>'"
+                    instruction: "Send USDC and retry with 'x-payment-tx'. You will receive a Bearer token for future requests."
                 }
             });
         }
 
-        console.log(`🐿️ Turnstile: Verifying ${paymentTx}...`);
+        // 3. Verify Payment & Issue Token
+        console.log(`🐿️ Turnstile: Verifying Payment ${paymentTx}...`);
         const result = await verifyPayment(paymentTx, receiver, price);
 
         if (!result.valid) {
             return res.status(403).json({ error: "Payment Invalid", reason: result.reason });
         }
 
-        // 3. Payment Valid! Issue Day Pass.
-        console.log(`✅ Payment Validated! Issuing Day Pass.`);
+        // 4. Return the Session Token (Client must save this)
+        console.log(`✅ Payment Valid! Issuing Session Token.`);
+        res.setHeader('x-turnstile-session', result.token); 
         
-        // Generate JWT (24h validity)
-        const sessionToken = jwt.sign({ 
-            paid: true, 
-            tx: paymentTx,
-            timestamp: Date.now() 
-        }, JWT_SECRET, { expiresIn: '24h' });
-
-        // Send token in header so agent can save it
-        res.setHeader('x-turnstile-session', sessionToken);
-        
+        // Optional: If it's a direct API call, maybe we just return the token now?
+        // But for middleware transparency, we attach it and let the request proceed.
+        // The client will see the header and should save it.
+        req.agentSession = { new: true, token: result.token };
         next();
     };
 }
